@@ -11,9 +11,44 @@ import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { createTour } from './tour/tour.js';
 
 const container = document.getElementById('viewport');
-const studio = createStudio(container);
-const { renderer, scene, camera, composer } = studio;
-const annotator = createAnnotator({ renderer, camera });
+
+let loadFailed = false;
+let loadingRemoveTimer = 0;
+function failLoading(err) {
+  if (loadFailed) return;
+  loadFailed = true;
+  console.error(err);
+  const root = document.getElementById('loading');
+  const msg = document.getElementById('loading-msg');
+  if (!root || !msg) return;
+  // Undo a late boot that already started fading the overlay out.
+  clearTimeout(loadingRemoveTimer);
+  root.classList.remove('done');
+  root.classList.add('error');
+  root.querySelector('.spinner')?.remove();
+  const text = String(err?.message || err);
+  msg.textContent = /WebGL/i.test(text)
+    ? 'WebGL is unavailable in this browser. Open this page in Chrome, Edge, or Safari with hardware acceleration enabled.'
+    : `Failed to start: ${text}`;
+}
+// Catch sync throws during the rest of module init (before boot finishes).
+function onInitError(e) {
+  if (loadFailed || !document.getElementById('loading')) return;
+  // Ignore resource load noise (e.g. favicon 404); only real runtime Errors.
+  if (!(e.error instanceof Error)) return;
+  failLoading(e.error);
+}
+window.addEventListener('error', onInitError);
+
+let studio, renderer, scene, camera, composer, annotator;
+try {
+  studio = createStudio(container);
+  ({ renderer, scene, camera, composer } = studio);
+  annotator = createAnnotator({ renderer, camera });
+} catch (err) {
+  failLoading(err);
+  throw err;
+}
 
 // The post-processed frame is kept in a render target so the animated connection overlay can be
 // redrawn every frame without re-rendering the (expensive) scene.
@@ -248,9 +283,10 @@ function updateHover() {
 document.fonts?.ready.then(() => { overlayDirty = true; });
 
 // ---- boot ----
-setTimeout(() => {
-  const params = new URLSearchParams(location.search);
-  setView(views[params.get('view')] ? params.get('view') : 'superchip', { instant: true });
+// First view builds thousands of procedural parts + PCB textures on the main thread, which
+// freezes the spinner. Yield once so "Building…" can paint, then run the heavy work.
+function boot(params, initialView) {
+  setView(initialView, { instant: true });
   if (params.get('explode')) { explodeT = +params.get('explode'); $('explode').value = explodeT; applyExplode(); }
   for (const k of Object.keys(display)) if (params.has(k)) display[k] = params.get(k) !== '0';
   for (const k of Object.keys(display)) $(k).checked = display[k];
@@ -258,13 +294,28 @@ setTimeout(() => {
   if (params.get('cam')) { const c = preset(views[current].cams[params.get('cam')]); camera.position.set(...c.pos); controls.target.set(...c.target); }
   if (params.has('tour')) tour.start(Math.max(0, (+params.get('tour') || 1) - 1));
   invalidate({ shadows: true });
-  $('loading').classList.add('done');
-  setTimeout(() => $('loading').remove(), 800);
+  // Start the loop before dismissing the overlay. Keep onInitError until the first frame
+  // finishes — setAnimationLoop only schedules loop, it does not run it synchronously.
   renderer.setAnimationLoop(loop);
-}, 0);
+  $('loading').classList.add('done');
+  loadingRemoveTimer = setTimeout(() => $('loading')?.remove(), 800);
+}
+const bootParams = new URLSearchParams(location.search);
+const initialView = Object.hasOwn(views, bootParams.get('view')) ? bootParams.get('view') : 'superchip';
+const loadingMsg = document.getElementById('loading-msg');
+if (loadingMsg) loadingMsg.textContent = `Building ${views[initialView].title}…`;
+requestAnimationFrame(() => {
+  setTimeout(() => {
+    try {
+      boot(bootParams, initialView);
+    } catch (err) {
+      failLoading(err);
+    }
+  }, 0);
+});
 
 // ---- render on demand, with full-quality AO only once the view settles ----
-let needsRender = true, lastMotion = 0, settledFrameDone = false;
+let needsRender = true, lastMotion = 0, settledFrameDone = false, initErrorArmed = true;
 function invalidate({ shadows = false } = {}) {
   needsRender = true;
   settledFrameDone = false;
@@ -307,6 +358,11 @@ function loop(now) {
     renderer.render(annotator.overlay, camera);
     renderer.autoClear = true;
     overlayDirty = false;
+  }
+  // Disarm only after a successful first frame so a throw still reaches onInitError.
+  if (initErrorArmed) {
+    initErrorArmed = false;
+    window.removeEventListener('error', onInitError);
   }
 }
 
