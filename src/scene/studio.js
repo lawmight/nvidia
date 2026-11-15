@@ -53,8 +53,27 @@ function studioEnvironment(renderer) {
   return rt.texture;
 }
 
+function createRenderer() {
+  // Prefer a discrete GPU when available, but fall back — some dual-GPU / remote
+  // browsers reject `high-performance` and would otherwise leave the loading screen stuck.
+  const attempts = [
+    { antialias: false, powerPreference: 'high-performance' },
+    { antialias: false, powerPreference: 'default' },
+    { antialias: false, powerPreference: 'low-power', failIfMajorPerformanceCaveat: false },
+  ];
+  let lastErr;
+  for (const params of attempts) {
+    try {
+      return new THREE.WebGLRenderer(params);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr ?? new Error('THREE.WebGLRenderer: Error creating WebGL context.');
+}
+
 export function createStudio(container) {
-  const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+  const renderer = createRenderer();
   // Phones/tablets: cap resolution and shadow size to keep frame times and memory reasonable.
   const touch = matchMedia('(pointer: coarse)').matches;
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, touch ? 1.5 : 2));

@@ -11,7 +11,27 @@ import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { createTour } from './tour/tour.js';
 
 const container = document.getElementById('viewport');
-const studio = createStudio(container);
+
+function failLoading(err) {
+  console.error(err);
+  const root = document.getElementById('loading');
+  const msg = document.getElementById('loading-msg');
+  if (!root || !msg) return;
+  root.classList.add('error');
+  root.querySelector('.spinner')?.remove();
+  const text = String(err?.message || err);
+  msg.textContent = /WebGL/i.test(text)
+    ? 'WebGL is unavailable in this browser. Open the forwarded URL in Chrome, Edge, or Safari with hardware acceleration enabled.'
+    : `Failed to start: ${text}`;
+}
+
+let studio;
+try {
+  studio = createStudio(container);
+} catch (err) {
+  failLoading(err);
+  throw err;
+}
 const { renderer, scene, camera, composer } = studio;
 const annotator = createAnnotator({ renderer, camera });
 
@@ -248,7 +268,9 @@ function updateHover() {
 document.fonts?.ready.then(() => { overlayDirty = true; });
 
 // ---- boot ----
-setTimeout(() => {
+// First view builds thousands of procedural parts + PCB textures on the main thread, which
+// freezes the spinner. Yield once so "Building…" can paint, then run the heavy work.
+function boot() {
   const params = new URLSearchParams(location.search);
   setView(views[params.get('view')] ? params.get('view') : 'superchip', { instant: true });
   if (params.get('explode')) { explodeT = +params.get('explode'); $('explode').value = explodeT; applyExplode(); }
@@ -261,7 +283,18 @@ setTimeout(() => {
   $('loading').classList.add('done');
   setTimeout(() => $('loading').remove(), 800);
   renderer.setAnimationLoop(loop);
-}, 0);
+}
+const loadingMsg = document.getElementById('loading-msg');
+if (loadingMsg) loadingMsg.textContent = 'Building the superchip…';
+requestAnimationFrame(() => {
+  setTimeout(() => {
+    try {
+      boot();
+    } catch (err) {
+      failLoading(err);
+    }
+  }, 0);
+});
 
 // ---- render on demand, with full-quality AO only once the view settles ----
 let needsRender = true, lastMotion = 0, settledFrameDone = false;
